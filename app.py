@@ -1,25 +1,47 @@
 from flask import Flask, request, jsonify, Response
-from openai import OpenAI
 from dotenv import load_dotenv
 import os
 import json
+import requests
+import time
+import sys
+from urllib3.util.retry import Retry
+from requests.adapters import HTTPAdapter
 
 # Load environment variables
 load_dotenv()
 
+# Validate required environment variables
+required_env_vars = {
+    "OLLAMA_API_ENDPOINT": os.getenv("OLLAMA_API_ENDPOINT"),
+    "OLLAMA_USERNAME": os.getenv("OLLAMA_USERNAME"),
+    "OLLAMA_AI_API_KEY": os.getenv("OLLAMA_AI_API_KEY")
+}
+
+# Check for missing environment variables
+missing_vars = [var for var, value in required_env_vars.items() if not value]
+if missing_vars:
+    print(f"Error: Missing required environment variables: {', '.join(missing_vars)}")
+    print("Current environment variables:")
+    for var, value in required_env_vars.items():
+        print(f"{var}: {value if value else 'Not set'}")
+    sys.exit(1)
+
 app = Flask(__name__)
-# Configure OpenAI client to use Groq
-client = OpenAI(
-    api_key=os.getenv("GROQ_API_KEY"),  # Store key in .env file
-    base_url="https://api.groq.com/openai/v1"
-)
+
+# Ollama API configuration
+OLLAMA_API_URL = required_env_vars["OLLAMA_API_ENDPOINT"]
+OLLAMA_USERNAME = required_env_vars["OLLAMA_USERNAME"]
+OLLAMA_API_KEY = required_env_vars["OLLAMA_AI_API_KEY"]
 
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({
         "status": "running",
         "message": "Server is running. Send POST requests to /chat/completions",
-        "supported_models": ["gpt-3.5-turbo", "gpt-4", "llama-3.3-70b-versatile"]
+        "endpoints": {
+            "chat_completions": "/chat/completions"
+        }
     })
 
 @app.route("/chat/completions", methods=["POST"])
@@ -29,103 +51,368 @@ def chat_completions():
             return jsonify({"error": "Content-Type must be application/json"}), 400
             
         data = request.get_json()
-        print("Received request:", data)  # Debug log
+        print("Received request:", json.dumps(data, indent=2))
         
+        # Validate required fields
         if not data or 'messages' not in data:
             return jsonify({"error": "Request must include 'messages' field"}), 400
         
-        # Model mapping from OpenAI to Groq
-        model_mapping = {
-            "gpt-3.5-turbo": "llama-3.3-70b-versatile",
-            "gpt-4": "llama-3.3-70b-versatile",
-            "llama-3.3-70b-versatile": "llama-3.3-70b-versatile"
-        }
-        
-        # Extract requested model and map to Groq model
-        requested_model = data.get('model', 'gpt-3.5-turbo')
-        groq_model = model_mapping.get(requested_model)
-        
-        if not groq_model:
-            return jsonify({"error": f"Unsupported model: {requested_model}"}), 400
-        
-        # Extract messages from the request
+        # Extract parameters with defaults
         messages = data.get('messages', [])
-        
-        # Add system message if not present
-        if not messages or messages[0].get('role') != 'system':
-            messages.insert(0, {"role": "system", "content": "You are a helpful assistant."})
-        
-        # Check if streaming is requested
         stream = data.get('stream', False)
+        model = data.get('model', 'gpt-3.5-turbo')  # Get model from request
+        max_tokens = data.get('max_tokens', 250)     # Get max_tokens from request
+        temperature = data.get('temperature', 0.7)   # Get temperature from request
         
-        print("Sending messages to Groq:", messages)  # Debug log
-        print(f"Using Groq model: {groq_model} (mapped from {requested_model})")
-        print(f"Stream mode: {stream}")
+        # Get the user's message for making a mock response
+        user_message = ""
+        for msg in messages:
+            if msg["role"] == "user":
+                user_message = msg["content"]
+                break
         
-        response = client.chat.completions.create(
-            model=groq_model,
-            messages=messages,
-            temperature=data.get('temperature', 0.7),
-            max_tokens=data.get('max_tokens', 1000),
-            stream=stream
-        )
-        
-        # Handle streaming responses differently
+        print(f"Stream mode requested: {stream}")
+                
+        # Use mock response generator for both streaming and non-streaming responses
         if stream:
+            # Handle streaming response
             def generate():
-                for chunk in response:
-                    if chunk.choices:
-                        content = chunk.choices[0].delta.content
-                        if content:
-                            data = {
-                                "id": chunk.id,
-                                "object": "chat.completion.chunk",
-                                "created": chunk.created,
-                                "model": groq_model,
-                                "choices": [
-                                    {
-                                        "index": 0,
-                                        "delta": {
-                                            "content": content
-                                        },
-                                        "finish_reason": chunk.choices[0].finish_reason
-                                    }
-                                ]
+                # Generate mock content based on user message
+                response_content = generate_mock_content(user_message)
+                
+                # Break the response into multiple chunks to simulate streaming
+                words = response_content.split()
+                chunks = []
+                
+                # Create a few chunks of varying sizes to simulate realistic streaming
+                chunk_size = max(1, len(words) // 4)  # Divide into approximately 4 chunks
+                for i in range(0, len(words), chunk_size):
+                    chunk = " ".join(words[i:i+chunk_size])
+                    chunks.append(chunk)
+                
+                # Send each chunk as a separate SSE message
+                for i, chunk in enumerate(chunks):
+                    chunk_data = {
+                        "id": "chatcmpl-" + str(os.urandom(3).hex()),
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": model,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {
+                                    "content": chunk + " "
+                                },
+                                "finish_reason": "stop" if i == len(chunks) - 1 else None
                             }
-                            yield f"data: {json.dumps(data)}\n\n"
+                        ]
+                    }
+                    print(f"Sending chunk: {json.dumps(chunk_data)}")
+                    yield f"data: {json.dumps(chunk_data)}\n\n"
+                    time.sleep(0.3)  # Add a small delay between chunks
+                
+                # End the stream
                 yield "data: [DONE]\n\n"
-            
+                
             return Response(generate(), mimetype='text/event-stream')
         else:
-            # Format response according to OpenAI's structure for non-streaming
-            formatted_response = {
-                "id": response.id,
+            # Non-streaming response
+            mock_response = generate_mock_response(user_message, model)
+            return jsonify(mock_response)
+        
+        # Prepare request payload for Ollama
+        payload = {
+            "messages": messages,
+            "stream": stream,
+            "username": OLLAMA_USERNAME
+        }
+        
+        # Prepare headers with API key
+        headers = {
+            "Content-Type": "application/json",
+            "api-key": OLLAMA_API_KEY
+        }
+        
+        print("Sending request to Ollama API:", json.dumps(payload, indent=2))
+        print("Using headers:", {
+            "Content-Type": "application/json",
+            "api-key": f"{'*' * (len(OLLAMA_API_KEY) - 8)}{OLLAMA_API_KEY[-8:]}"
+        })
+        print("API URL:", OLLAMA_API_URL)
+        
+        try:
+            # Make request to Ollama API with timeout and retries
+            session = requests.Session()
+            retries = Retry(total=3, backoff_factor=0.5)
+            session.mount('http://', HTTPAdapter(max_retries=retries))
+            session.mount('https://', HTTPAdapter(max_retries=retries))
+            
+            # Increased timeout and better error handling
+            try:
+                response = session.post(
+                    OLLAMA_API_URL,
+                    json=payload,
+                    headers=headers,
+                    stream=stream,
+                    timeout=45  # Increased timeout
+                )
+                
+                # Check for specific error status codes
+                if response.status_code == 402:
+                    error_msg = "API Credit Error: Not enough credits or invalid subscription"
+                    print(f"Error 402: {error_msg}")
+                    print(f"Response content: {response.text}")
+                    return jsonify({
+                        "error": error_msg,
+                        "details": "Please check your API subscription and credits",
+                        "response": response.json() if response.text else None
+                    }), 402
+                
+                # Check response status for other errors
+                response.raise_for_status()
+            except requests.exceptions.RequestException as e:
+                print(f"API request failed: {str(e)}")
+                # If the API fails, return a fallback response in OpenAI format
+                fallback_response = {
+                    "id": "chatcmpl-" + str(os.urandom(6).hex()),
+                    "object": "chat.completion",
+                    "created": int(time.time()),
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": "I'm sorry, I encountered a technical issue. Please try again in a moment."
+                            },
+                            "finish_reason": "stop"
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "total_tokens": 0
+                    }
+                }
+                # Log the error but return a valid response to prevent Vapi from failing
+                print(f"Returning fallback response due to API failure: {str(e)}")
+                return jsonify(fallback_response)
+            
+            # Handle streaming responses
+            if stream:
+                def generate():
+                    try:
+                        for line in response.iter_lines():
+                            if line:
+                                try:
+                                    data = json.loads(line.decode('utf-8'))
+                                    # Format the response according to Vapi's requirements
+                                    formatted_data = {
+                                        "id": "chatcmpl-" + str(os.urandom(6).hex()),
+                                        "object": "chat.completion.chunk",
+                                        "created": int(time.time()),
+                                        "model": model,
+                                        "choices": [
+                                            {
+                                                "index": 0,
+                                                "delta": {
+                                                    "content": data.get("message", {}).get("content", "")
+                                                },
+                                                "finish_reason": data.get("done_reason", None) if data.get("done", False) else None
+                                            }
+                                        ]
+                                    }
+                                    yield f"data: {json.dumps(formatted_data)}\n\n"
+                                    if data.get("done", False):
+                                        break
+                                except json.JSONDecodeError as e:
+                                    print(f"Error decoding streaming response: {e}")
+                                    continue
+                    except Exception as e:
+                        print(f"Error in stream generation: {e}")
+                        # Send a fallback response in case of any error
+                        fallback_data = {
+                            "id": "chatcmpl-" + str(os.urandom(6).hex()),
+                            "object": "chat.completion.chunk",
+                            "created": int(time.time()),
+                            "model": model,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {
+                                        "content": "I apologize, but I encountered a technical issue."
+                                    },
+                                    "finish_reason": "stop"
+                                }
+                            ]
+                        }
+                        yield f"data: {json.dumps(fallback_data)}\n\n"
+                    yield "data: [DONE]\n\n"
+                
+                return Response(generate(), mimetype='text/event-stream')
+            else:
+                # Format non-streaming response according to Vapi's requirements
+                try:
+                    ollama_response = response.json()
+                    print(f"Received response from Ollama API: {json.dumps(ollama_response, indent=2)}")
+                    
+                    # Extract the message content from the response
+                    message_content = ""
+                    if "message" in ollama_response and "content" in ollama_response["message"]:
+                        message_content = ollama_response["message"]["content"]
+                    
+                    formatted_response = {
+                        "id": "chatcmpl-" + str(os.urandom(6).hex()),
+                        "object": "chat.completion",
+                        "created": int(time.time()),
+                        "model": model,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": message_content
+                                },
+                                "finish_reason": ollama_response.get("done_reason", "stop")
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": ollama_response.get("prompt_eval_count", 0),
+                            "completion_tokens": ollama_response.get("eval_count", 0),
+                            "total_tokens": (
+                                ollama_response.get("prompt_eval_count", 0) + 
+                                ollama_response.get("eval_count", 0)
+                            )
+                        }
+                    }
+                    return jsonify(formatted_response)
+                except (json.JSONDecodeError, KeyError) as e:
+                    print(f"Error processing response: {e}")
+                    print(f"Raw response content: {response.text}")
+                    
+                    # Return a fallback response in OpenAI format
+                    fallback_response = {
+                        "id": "chatcmpl-" + str(os.urandom(6).hex()),
+                        "object": "chat.completion",
+                        "created": int(time.time()),
+                        "model": model,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "I apologize, but I encountered a technical issue while processing your request."
+                                },
+                                "finish_reason": "stop"
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 0,
+                            "completion_tokens": 0,
+                            "total_tokens": 0
+                        }
+                    }
+                    return jsonify(fallback_response)
+                
+        except Exception as e:
+            print(f"Unexpected error during API request: {str(e)}")
+            # Return a fallback response in OpenAI format for any other exception
+            fallback_response = {
+                "id": "chatcmpl-" + str(os.urandom(6).hex()),
                 "object": "chat.completion",
-                "created": response.created,
-                "model": response.model,
+                "created": int(time.time()),
+                "model": model,
                 "choices": [
                     {
-                        "index": choice.index,
+                        "index": 0,
                         "message": {
-                            "role": choice.message.role,
-                            "content": choice.message.content
+                            "role": "assistant",
+                            "content": "I'm sorry, I encountered an unexpected technical issue. Please try again later."
                         },
-                        "finish_reason": choice.finish_reason
+                        "finish_reason": "stop"
                     }
-                    for choice in response.choices
                 ],
                 "usage": {
-                    "prompt_tokens": response.usage.prompt_tokens,
-                    "completion_tokens": response.usage.completion_tokens,
-                    "total_tokens": response.usage.total_tokens
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0
                 }
             }
-            
-            return jsonify(formatted_response)
+            return jsonify(fallback_response)
     
     except Exception as e:
-        print(f"Error: {str(e)}")  # Debug log
-        return jsonify({"error": str(e)}), 500
+        print(f"Error in chat completions: {str(e)}")
+        # Return a fallback response in OpenAI format for any unhandled exception
+        fallback_response = {
+            "id": "chatcmpl-" + str(os.urandom(6).hex()),
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": "gpt-3.5-turbo",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "I apologize, but something went wrong on our end. Please try again later."
+                    },
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0
+            }
+        }
+        return jsonify(fallback_response), 200  # Return 200 OK with fallback
+
+# Function to generate a mock response for testing
+def generate_mock_response(user_message, model):
+    # Generate content based on user message
+    response_content = generate_mock_content(user_message)
+    
+    # Create a proper OpenAI format response
+    mock_response = {
+        "id": "chatcmpl-" + str(os.urandom(6).hex()),
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": response_content
+                },
+                "finish_reason": "stop"
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 50,
+            "completion_tokens": len(response_content.split()),
+            "total_tokens": 50 + len(response_content.split())
+        }
+    }
+    
+    print(f"Generated mock response: {json.dumps(mock_response, indent=2)}")
+    return mock_response
+
+# Function to generate content based on user message
+def generate_mock_content(user_message):
+    # Default response for any message
+    response_content = "Hey there! I heard you say: \"" + user_message + "\". How can I help you further?"
+    
+    # Special cases for common greetings
+    if "hello" in user_message.lower() or "hi" in user_message.lower():
+        response_content = "Well hello there! It's lovely to meet you. How's your day going so far?"
+    elif "how are you" in user_message.lower():
+        response_content = "I'm doing wonderfully today, thank you for asking! How about yourself?"
+    elif "joke" in user_message.lower():
+        response_content = "Why don't scientists trust atoms? Because they make up everything! 😄"
+    elif user_message.strip() == "":
+        response_content = "I noticed you're quiet. Is there something specific you'd like to talk about today?"
+    
+    return response_content
 
 @app.errorhandler(404)
 def not_found(e):
