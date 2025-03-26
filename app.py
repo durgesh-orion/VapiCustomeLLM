@@ -72,7 +72,9 @@ def chat_completions():
                 break
         
         print(f"Stream mode requested: {stream}")
-                
+        
+        # Comment out mock implementation
+        """
         # Use mock response generator for both streaming and non-streaming responses
         if stream:
             # Handle streaming response
@@ -119,84 +121,135 @@ def chat_completions():
             # Non-streaming response
             mock_response = generate_mock_response(user_message, model)
             return jsonify(mock_response)
+        """
         
         # Prepare request payload for Ollama
         payload = {
             "messages": messages,
             "stream": stream,
-            "username": OLLAMA_USERNAME
+            "username": OLLAMA_USERNAME,
+            "model": "huggingface.co/mradermacher/Llama-3.1-8b-Uncensored-Dare-i1-GGUF:i1-Q4_K_M",  # Add specific model
+            "temperature": temperature,  # Add temperature
+            "max_tokens": max_tokens    # Add max_tokens
         }
         
-        # Prepare headers with API key
+        # Prepare headers with API key - using the exact format from the working curl command
         headers = {
             "Content-Type": "application/json",
-            "api-key": OLLAMA_API_KEY
+            "api-key": OLLAMA_API_KEY,
+            "Accept": "application/json",
+            "User-Agent": "Python/Flask Client"
         }
+        
+        # Validate and sanitize the request
+        try:
+            # Ensure messages are properly formatted
+            for msg in messages:
+                if not isinstance(msg, dict) or "role" not in msg or "content" not in msg:
+                    raise ValueError("Invalid message format")
+                if msg["role"] not in ["system", "user", "assistant"]:
+                    raise ValueError(f"Invalid role: {msg['role']}")
+                # Sanitize content to remove any problematic characters
+                msg["content"] = msg["content"].strip()
+            
+            # Ensure username is properly formatted
+            if not "@" in OLLAMA_USERNAME:
+                raise ValueError("Invalid username format")
+            
+            # Ensure API key is present and properly formatted
+            if not OLLAMA_API_KEY or len(OLLAMA_API_KEY) < 10:
+                raise ValueError("Invalid API key format")
+                
+        except ValueError as e:
+            print(f"Request validation error: {str(e)}")
+            return jsonify({
+                "error": "Invalid request format",
+                "details": str(e)
+            }), 400
         
         print("Sending request to Ollama API:", json.dumps(payload, indent=2))
         print("Using headers:", {
             "Content-Type": "application/json",
-            "api-key": f"{'*' * (len(OLLAMA_API_KEY) - 8)}{OLLAMA_API_KEY[-8:]}"
+            "api-key": f"{'*' * (len(OLLAMA_API_KEY) - 8)}{OLLAMA_API_KEY[-8:]}",
+            "Accept": "application/json",
+            "User-Agent": "Python/Flask Client"
         })
         print("API URL:", OLLAMA_API_URL)
         
         try:
             # Make request to Ollama API with timeout and retries
             session = requests.Session()
-            retries = Retry(total=3, backoff_factor=0.5)
+            retries = Retry(
+                total=3,  # Reduced retries to avoid long waits
+                backoff_factor=0.5,  # Reduced backoff
+                status_forcelist=[500, 502, 503, 504]  # Retry on specific status codes
+            )
             session.mount('http://', HTTPAdapter(max_retries=retries))
             session.mount('https://', HTTPAdapter(max_retries=retries))
             
-            # Increased timeout and better error handling
-            try:
+            # Try without streaming first if streaming fails
+            if stream:
+                try:
+                    response = session.post(
+                        OLLAMA_API_URL,
+                        json=payload,
+                        headers=headers,
+                        stream=True,
+                        timeout=30  # Reduced timeout
+                    )
+                    
+                    if response.status_code == 500:
+                        print("Streaming request failed, trying without streaming...")
+                        # Retry without streaming
+                        payload["stream"] = False
+                        response = session.post(
+                            OLLAMA_API_URL,
+                            json=payload,
+                            headers=headers,
+                            stream=False,
+                            timeout=30
+                        )
+                except Exception as e:
+                    print(f"Streaming request failed: {str(e)}")
+                    # Retry without streaming
+                    payload["stream"] = False
+                    response = session.post(
+                        OLLAMA_API_URL,
+                        json=payload,
+                        headers=headers,
+                        stream=False,
+                        timeout=30
+                    )
+            else:
                 response = session.post(
                     OLLAMA_API_URL,
                     json=payload,
                     headers=headers,
-                    stream=stream,
-                    timeout=45  # Increased timeout
+                    stream=False,
+                    timeout=30
                 )
-                
-                # Check for specific error status codes
-                if response.status_code == 402:
-                    error_msg = "API Credit Error: Not enough credits or invalid subscription"
-                    print(f"Error 402: {error_msg}")
-                    print(f"Response content: {response.text}")
-                    return jsonify({
-                        "error": error_msg,
-                        "details": "Please check your API subscription and credits",
-                        "response": response.json() if response.text else None
-                    }), 402
-                
-                # Check response status for other errors
-                response.raise_for_status()
-            except requests.exceptions.RequestException as e:
-                print(f"API request failed: {str(e)}")
-                # If the API fails, return a fallback response in OpenAI format
-                fallback_response = {
-                    "id": "chatcmpl-" + str(os.urandom(6).hex()),
-                    "object": "chat.completion",
-                    "created": int(time.time()),
-                    "model": model,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "message": {
-                                "role": "assistant",
-                                "content": "I'm sorry, I encountered a technical issue. Please try again in a moment."
-                            },
-                            "finish_reason": "stop"
-                        }
-                    ],
-                    "usage": {
-                        "prompt_tokens": 0,
-                        "completion_tokens": 0,
-                        "total_tokens": 0
-                    }
-                }
-                # Log the error but return a valid response to prevent Vapi from failing
-                print(f"Returning fallback response due to API failure: {str(e)}")
-                return jsonify(fallback_response)
+            
+            # Print the full response for debugging
+            print(f"Response status code: {response.status_code}")
+            print(f"Response headers: {dict(response.headers)}")
+            print(f"Response content: {response.text}")
+            
+            # Check for specific error status codes
+            if response.status_code == 402:
+                error_msg = "API Credit Error: Not enough credits or invalid subscription"
+                print(f"Error 402: {error_msg}")
+                print(f"Response content: {response.text}")
+                return jsonify({
+                    "error": error_msg,
+                    "details": "Please check your API subscription and credits",
+                    "response": response.json() if response.text else None
+                }), 402
+            
+            # Check response status for other errors
+            response.raise_for_status()
+            
+            # If we get here, the request was successful
+            print("Request successful!")
             
             # Handle streaming responses
             if stream:
@@ -206,6 +259,8 @@ def chat_completions():
                             if line:
                                 try:
                                     data = json.loads(line.decode('utf-8'))
+                                    print(f"Received streaming data: {json.dumps(data, indent=2)}")
+                                    
                                     # Format the response according to Vapi's requirements
                                     formatted_data = {
                                         "id": "chatcmpl-" + str(os.urandom(6).hex()),
@@ -218,7 +273,7 @@ def chat_completions():
                                                 "delta": {
                                                     "content": data.get("message", {}).get("content", "")
                                                 },
-                                                "finish_reason": data.get("done_reason", None) if data.get("done", False) else None
+                                                "finish_reason": "stop" if data.get("done", False) else None
                                             }
                                         ]
                                     }
@@ -257,9 +312,7 @@ def chat_completions():
                     print(f"Received response from Ollama API: {json.dumps(ollama_response, indent=2)}")
                     
                     # Extract the message content from the response
-                    message_content = ""
-                    if "message" in ollama_response and "content" in ollama_response["message"]:
-                        message_content = ollama_response["message"]["content"]
+                    message_content = ollama_response.get("message", {}).get("content", "")
                     
                     formatted_response = {
                         "id": "chatcmpl-" + str(os.urandom(6).hex()),
@@ -273,7 +326,7 @@ def chat_completions():
                                     "role": "assistant",
                                     "content": message_content
                                 },
-                                "finish_reason": ollama_response.get("done_reason", "stop")
+                                "finish_reason": "stop"
                             }
                         ],
                         "usage": {
