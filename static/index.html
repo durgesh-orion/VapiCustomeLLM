@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vapi AI Call Interface</title>
+    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/@vapi-ai/web@latest/dist/index.browser.js"></script>
+</head>
+<body>
+    <div class="container">
+        <h1>Vapi AI Call Interface</h1>
+        
+        <div class="call-controls">
+            <button id="callButton" class="call-button">
+                <i class="fas fa-phone"></i> Start Call
+            </button>
+        </div>
+
+        <div id="callStatus" class="call-status"></div>
+
+        <div class="content-container">
+            <div class="chat-section">
+                <h2>Chat Messages</h2>
+                <div id="chatMessages" class="chat-messages"></div>
+                <div class="chat-input">
+                    <textarea id="userInput" placeholder="Type your message here..." rows="3"></textarea>
+                    <button id="sendButton">Send</button>
+                </div>
+            </div>
+
+            <div class="output-section">
+                <div class="transcript-container">
+                    <h2>Transcript</h2>
+                    <pre id="transcript" class="output-box"></pre>
+                </div>
+
+                <div class="logs-container">
+                    <h2>Call Logs</h2>
+                    <pre id="callLogs" class="output-box"></pre>
+                </div>
+
+                <div class="debug-container">
+                    <h2>Debug Info</h2>
+                    <div class="debug-section">
+                        <h3>Request Details</h3>
+                        <pre id="requestDetails" class="output-box"></pre>
+                    </div>
+                    <div class="debug-section">
+                        <h3>Server Response</h3>
+                        <pre id="serverResponse" class="output-box"></pre>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script defer src="script.js"></script>
+</body>
+</html> 
